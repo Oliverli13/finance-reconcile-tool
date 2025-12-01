@@ -9,14 +9,14 @@ from datetime import datetime
 # 1. 页面配置
 # ==========================================
 st.set_page_config(
-    page_title="财务智能核对系统 (场景适配版)", 
+    page_title="财务智能核对系统 (最终修正版)", 
     layout="wide", 
     page_icon="🧬",
     initial_sidebar_state="expanded"
 )
 
 st.title("🧬 销售折让 vs ERP - 智能核对系统")
-st.markdown("### ✨ 特性：精准场景匹配 | 冲销/暂估双模式 | 自动去后缀")
+st.markdown("### ✨ 特性：冲销类型筛选修正 | 智能匹配 | 穿透查询")
 st.markdown("---")
 
 # ==========================================
@@ -26,8 +26,7 @@ st.sidebar.header("1. 全局设置")
 
 TASK_MODE = st.sidebar.radio("🛠️ 选择任务模式", ["暂估核对 (Provision)", "冲销核对 (Write-off)"])
 
-# === 核心配置：场景选项 ===
-# 这里是您在侧边栏看到的“人性化名称”
+# 场景选项
 SCENARIO_OPTIONS = [
     "商务一级", 
     "商务二级", 
@@ -77,32 +76,22 @@ file_left = st.sidebar.file_uploader(file_label_1, type=["xlsx", "csv"])
 file_right = st.sidebar.file_uploader(file_label_2, type=["xlsx", "csv"])
 
 # ==========================================
-# 3. 智能场景映射 (The Translation Layer)
+# 3. 智能场景映射
 # ==========================================
 def get_search_keyword(scenario):
     """
-    将侧边栏的“人性化名称”翻译成“Excel里的真实名称”
+    场景关键词映射
     """
-    # 字典格式： "侧边栏名称": ["Excel里可能的名称1", "Excel里可能的名称2"]
     MAPPING = {
-        # 1. 商务板块
         "商务一级": ["商务一级", "商务一级备案"],
         "商务二级": ["商务二级", "商务二级备案"],
-        
-        # 2. 其他
         "其他折让": ["其他折扣", "其他折让"],
-        
-        # 3. 大健康板块 (注意连字符)
         "大健康新零售": ["大健康新零售", "大健康-新零售"],
         "大健康商超":   ["大健康-商超", "大健康商超"],
         "大健康海外":   ["大健康-海外", "大健康海外"],
-        
-        # 4. OTC/澳诺
         "OTC医疗备案": ["OTC-医疗备案", "OTC医疗备案", "OTC备案"],
         "澳诺":       ["OTX-澳诺备案", "澳诺", "OTX澳诺"]
     }
-    
-    # 如果没找到预设映射，就直接用原名去搜
     return MAPPING.get(scenario, [scenario])
 
 # ==========================================
@@ -123,7 +112,6 @@ def clean_amount(series):
     return pd.to_numeric(series, errors='coerce').fillna(0)
 
 def strip_suffix(code):
-    """去除 -00 后缀"""
     code = clean_str(code)
     if '-' in code:
         return code.split('-')[0].strip()
@@ -172,7 +160,9 @@ def process_provision_data(df, valid_codes, valid_names, scenario):
     col_code = next((c for c in df.columns if '一级客户编码' in c), None)
     col_name = next((c for c in df.columns if '一级客户名称' in c), None)
     
-    if not col_code: return pd.DataFrame()
+    if not col_code: 
+        st.error("❌ 未找到【一级客户编码】")
+        return pd.DataFrame()
 
     df['原始编码'] = df[col_code].apply(clean_str)
     df['原始名称'] = df[col_name].apply(clean_str) if col_name else ''
@@ -196,43 +186,42 @@ def process_provision_data(df, valid_codes, valid_names, scenario):
     return df
 
 def process_writeoff_discount(df, target_scenario):
-    """冲销处理 (含智能筛选)"""
+    """
+    冲销处理 (修正：在【类型更新】列筛选场景)
+    """
     df.columns = df.columns.astype(str).str.strip()
     
     col_code = next((c for c in df.columns if '客户' in c and ('号' in c or '编码' in c)), None) 
     col_biz = next((c for c in df.columns if '业务线' in c), None) 
     col_amt = next((c for c in df.columns if '汇总' in c or '金额' in c), None) 
+    # 关键列：类型更新
     col_type = next((c for c in df.columns if '类型' in c), None) 
     
-    if not col_code or not col_biz or not col_amt:
-        st.error(f"❌ 冲销表列识别失败。\n需包含：客户号、业务线、汇总。\n读取到: {list(df.columns)}")
+    if not col_code or not col_biz or not col_amt or not col_type:
+        st.error(f"❌ 冲销表列识别失败。\n需包含：客户号、业务线、汇总、类型更新。\n读取到: {list(df.columns)}")
         return pd.DataFrame()
 
     df['Code_Raw'] = df[col_code].apply(clean_str)
     df['Code_Clean'] = df['Code_Raw'].apply(strip_suffix) 
     df['业务线'] = df[col_biz].apply(clean_str)
     df['金额'] = clean_amount(df[col_amt])
-    df['类型'] = df[col_type].apply(clean_str) if col_type else '默认'
+    df['类型'] = df[col_type].apply(clean_str) # 确保类型列也是字符串
     
-    # --- 智能筛选 ---
+    # --- 智能筛选 (Target: 类型列) ---
     if target_scenario != "自定义":
-        # 获取关键词列表
         keywords = get_search_keyword(target_scenario)
-        # 构建正则：包含 k1 或 k2 ...
         pattern = "|".join([k.replace('-', r'\-') for k in keywords])
         
-        filtered_df = df[df['业务线'].str.contains(pattern, na=False, case=False)]
+        # 核心修改：在 df['类型'] 中筛选，而不是 df['业务线']
+        filtered_df = df[df['类型'].str.contains(pattern, na=False, case=False)]
         
         if filtered_df.empty:
-            st.error(f"❌ 筛选失败！在冲销表的『业务线』列中，未找到包含以下关键词的数据：{keywords}")
-            st.info("💡 建议检查Excel中的业务线名称是否正确。")
-            st.write("📊 实际业务线列表预览:", df['业务线'].unique())
+            st.error(f"❌ 筛选失败！在冲销表的『{col_type}』列中，未找到包含以下关键词的数据：{keywords}")
+            st.info(f"💡 请检查该列数据，当前该列包含的值有：")
+            st.write(df['类型'].unique()) # 打印出所有类型供用户排查
             return filtered_df
-        
-        # 成功提示
-        # matched_scenarios = filtered_df['业务线'].unique()
-        # st.success(f"✅ 筛选成功！匹配到以下业务线: {matched_scenarios}")
-        df = filtered_df
+        else:
+            df = filtered_df
             
     df['透视Key'] = df['Code_Clean'] + df['业务线']
     return df
@@ -249,10 +238,7 @@ def process_erp_generic(df, bus_map, valid_codes, valid_names, scenario, mode):
 
     df['原始交易编码'] = df['交易对象编码'].apply(clean_prefix)
     df['Code_Clean'] = df['原始交易编码'].apply(strip_suffix)
-    if '交易对象名称' in df.columns:
-        df['原始交易名称'] = df['交易对象名称'].apply(clean_str)
-    else:
-        df['原始交易名称'] = ''
+    df['原始交易名称'] = df['交易对象名称'].apply(clean_str) if '交易对象名称' in df.columns else ''
     
     df['帐户'] = df['帐户'].astype(str).str.strip()
     df['金额_借贷'] = clean_amount(df['本位币借方']) + clean_amount(df['本位币贷方'])
@@ -265,12 +251,13 @@ def process_erp_generic(df, bus_map, valid_codes, valid_names, scenario, mode):
     df['提取_业务线Code'] = df['帐户'].apply(extract_bus)
     df['业务线'] = df['提取_业务线Code'].apply(clean_str).map(bus_map) if bus_map else None
     
+    # 商务二级在暂估模式下用名称，冲销模式下用编码
     if mode == "PROVISION" and scenario == "商务二级":
         df['标准名称'] = df['原始交易名称'].apply(normalize_brackets)
         df['透视Key'] = df['标准名称'] + df['业务线']
         df['是否关联方'] = df['标准名称'].apply(lambda x: x in valid_names)
     else:
-        df['透视Key'] = df['Code_Clean'] + df['业务线']
+        df['透视Key'] = df.apply(lambda x: x['Code_Clean'] + x['业务线'] if pd.notna(x['业务线']) else None, axis=1)
         if valid_codes:
             df['是否关联方'] = df['Code_Clean'].apply(lambda x: x in valid_codes)
         else:
@@ -290,9 +277,9 @@ def perform_reconciliation(df_p, df_e, mode):
             '传ERP金额':'sum', '金额_不含税':'sum', '税额':'sum'
         }).rename(columns={'传ERP金额':'折让_总额', '金额_不含税':'折让_金额', '税额':'折让_税额'})
     else:
-        # 冲销：透视类型列
         p_data = df_p.dropna(subset=[key_col])
         if p_data.empty: return pd.DataFrame()
+        # 冲销：透视类型列
         p_agg = p_data.pivot_table(index=key_col, columns='类型', values='金额', aggfunc='sum', fill_value=0)
         p_agg['折让_汇总总计'] = p_agg.sum(axis=1)
         
@@ -333,10 +320,9 @@ def perform_reconciliation(df_p, df_e, mode):
         return merged[[c for c in cols if c in merged.columns]]
     else:
         merged['核对_差额(0)'] = merged['折让_汇总总计'] + merged['ERP_应收账款(总账)']
-        # 把折让的所有类型列都展示出来，方便看详情
         fixed_cols = ['折让_汇总总计', 'ERP_应收账款(总账)', '核对_差额(0)']
-        dynamic_cols = [c for c in merged.columns if c not in fixed_cols and 'ERP' not in c]
-        return merged[fixed_cols + dynamic_cols]
+        other_cols = [c for c in merged.columns if c not in fixed_cols and 'ERP' not in c]
+        return merged[fixed_cols + other_cols]
 
 def apply_styles(df):
     def hl(val): 
@@ -354,59 +340,49 @@ if match_file_source and file_left and file_right:
     
     if bus_map:
         try:
-            # 读取文件
             df_l = pd.read_csv(file_left) if file_left.name.endswith('.csv') else pd.read_excel(file_left)
             h_row = 3
             df_r = pd.read_excel(file_right, header=h_row) if not file_right.name.endswith('.csv') else pd.read_csv(file_right, header=h_row)
             
             st.info(f"🚀 正在执行：{TASK_MODE} | 场景：{selected_scenario}")
             
-            # 兼容版渲染函数
-            def render_safe_tab(df_main, source_p, source_e, key_prefix):
-                col_f, _ = st.columns([1,4])
-                show_diff = col_f.checkbox("🧨 只看差异", key=f"chk_{key_prefix}")
-                df_v = df_main.copy()
-                if show_diff:
-                    chk = [c for c in df_v.columns if '核对' in c]
-                    cond = df_v[chk].apply(lambda x: x.abs()>0.01).any(axis=1)
-                    df_v = df_v[cond]
-                
-                df_t = add_total_row(df_v)
-                
-                # 点击交互
-                sel = st.dataframe(
-                    apply_styles(df_t), 
-                    use_container_width=True, 
-                    height=500,
-                    on_select="rerun",
-                    selection_mode="single-row",
-                    key=f"grid_{key_prefix}"
-                )
-                
-                if sel.selection["rows"]:
-                    idx = sel.selection["rows"][0]
-                    key = df_t.index[idx]
-                    if key != "=== 总计 ===":
-                        st.markdown(f"### 👇 明细: `{key}`")
-                        d1, d2 = st.columns(2)
-                        with d1: st.caption("📘 折让系统"); st.dataframe(source_p[source_p['透视Key']==key], use_container_width=True)
-                        with d2: st.caption("📙 ERP系统"); st.dataframe(source_e[source_e['透视Key']==key], use_container_width=True)
-
+            # === 分流 ===
             if TASK_MODE == "暂估核对 (Provision)":
                 df_p = process_provision_data(df_l, valid_codes, valid_names, selected_scenario)
                 df_e = process_erp_generic(df_r, bus_map, valid_codes, valid_names, selected_scenario, "PROVISION")
                 
                 t1, t2, t3 = st.tabs(["👥 客户对账", "🏢 关联方对账", "📥 结果导出"])
                 
+                # 渲染函数 (复用)
+                def render_tab(df_res, p_src, e_src, k_pref):
+                    col_f, _ = st.columns([1,4])
+                    show_diff = col_f.checkbox("🧨 只看差异", key=f"c_{k_pref}")
+                    df_v = df_res.copy()
+                    if show_diff:
+                        chk = [c for c in df_v.columns if '核对' in c]
+                        cond = df_v[chk].apply(lambda x: x.abs()>0.01).any(axis=1)
+                        df_v = df_v[cond]
+                    
+                    df_t = add_total_row(df_v)
+                    sel = st.dataframe(apply_styles(df_t), use_container_width=True, height=500, on_select="rerun", selection_mode="single-row", key=f"t_{k_pref}")
+                    
+                    if sel.selection["rows"]:
+                        key = df_t.index[sel.selection["rows"][0]]
+                        if key != "=== 总计 ===":
+                            st.markdown(f"### 👇 明细: `{key}`")
+                            d1, d2 = st.columns(2)
+                            with d1: st.caption("📘 折让系统"); st.dataframe(p_src[p_src['透视Key']==key], use_container_width=True)
+                            with d2: st.caption("📙 ERP系统"); st.dataframe(e_src[e_src['透视Key']==key], use_container_width=True)
+
                 with t1:
                     res = perform_reconciliation(df_p, df_e, "PROVISION")
-                    render_safe_tab(res, df_p, df_e, "cust")
+                    render_tab(res, df_p, df_e, "cust")
                 with t2:
-                    df_p_rel = df_p[df_p['是否关联方']==True]
-                    df_e_rel = df_e[df_e['是否关联方']==True]
-                    res_rel = perform_reconciliation(df_p_rel, df_e_rel, "PROVISION")
+                    df_p_r = df_p[df_p['是否关联方']==True]
+                    df_e_r = df_e[df_e['是否关联方']==True]
+                    res_rel = perform_reconciliation(df_p_r, df_e_r, "PROVISION")
                     if res_rel.empty: st.warning("无关联方数据")
-                    else: render_safe_tab(res_rel, df_p, df_e, "rel")
+                    else: render_tab(res_rel, df_p, df_e, "rel")
                 with t3:
                     out = io.BytesIO()
                     with pd.ExcelWriter(out, engine='xlsxwriter') as w:
@@ -415,7 +391,7 @@ if match_file_source and file_left and file_right:
                     st.download_button("下载暂估核对", out.getvalue(), "暂估核对.xlsx")
 
             else:
-                # 冲销模式
+                # === 冲销 ===
                 df_p = process_writeoff_discount(df_l, selected_scenario)
                 if df_p.empty: st.stop()
                 
@@ -423,7 +399,25 @@ if match_file_source and file_left and file_right:
                 res_wo = perform_reconciliation(df_p, df_e, "WRITEOFF")
                 
                 st.write(f"📊 数据行数: 折让 {len(df_p)} | ERP {len(df_e)}")
-                render_safe_tab(res_wo, df_p, df_e, "wo")
+                
+                col_f, _ = st.columns([1,4])
+                show_diff = col_f.checkbox("🧨 只看差异")
+                df_v = res_wo.copy()
+                if show_diff:
+                    chk = [c for c in df_v.columns if '核对' in c]
+                    cond = df_v[chk].apply(lambda x: x.abs()>0.01).any(axis=1)
+                    df_v = df_v[cond]
+                
+                df_t = add_total_row(df_v)
+                sel = st.dataframe(apply_styles(df_t), use_container_width=True, height=600, on_select="rerun", selection_mode="single-row")
+                
+                if sel.selection["rows"]:
+                    key = df_t.index[sel.selection["rows"][0]]
+                    if key != "=== 总计 ===":
+                        st.markdown(f"### 👇 明细: `{key}`")
+                        d1, d2 = st.columns(2)
+                        with d1: st.caption("📘 折让系统"); st.dataframe(df_p[df_p['透视Key']==key], use_container_width=True)
+                        with d2: st.caption("📙 ERP系统"); st.dataframe(df_e[df_e['透视Key']==key], use_container_width=True)
                 
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine='xlsxwriter') as w:
@@ -433,7 +427,7 @@ if match_file_source and file_left and file_right:
                 st.download_button("下载冲销核对", out.getvalue(), "冲销核对.xlsx")
 
         except Exception as e:
-            st.error(f"处理错误: {e}")
+            st.error(f"运行出错: {e}")
             st.exception(e)
 else:
-    st.info("👈 请上传文件以开始")
+    st.info("👈 请先上传所需文件")
