@@ -9,14 +9,14 @@ from datetime import datetime
 # 1. 页面配置
 # ==========================================
 st.set_page_config(
-    page_title="财务智能核对系统 (冲销修正版)", 
+    page_title="财务智能核对系统 (最终版)", 
     layout="wide", 
     page_icon="🧬",
     initial_sidebar_state="expanded"
 )
 
 st.title("🧬 销售折让 vs ERP - 智能核对系统")
-st.markdown("### ✨ 特性：冲销相减核对 | 智能场景匹配 | 自动去后缀")
+st.markdown("### ✨ 特性：冲销相减核对 | 智能场景匹配 | 包含清洗后明细导出")
 st.markdown("---")
 
 # ==========================================
@@ -26,7 +26,6 @@ st.sidebar.header("1. 全局设置")
 
 TASK_MODE = st.sidebar.radio("🛠️ 选择任务模式", ["暂估核对 (Provision)", "冲销核对 (Write-off)"])
 
-# 场景选项
 SCENARIO_OPTIONS = [
     "商务一级", 
     "商务二级", 
@@ -40,7 +39,6 @@ SCENARIO_OPTIONS = [
 ]
 selected_scenario = st.sidebar.selectbox("📂 业务场景 / 筛选维度", SCENARIO_OPTIONS)
 
-# 提示逻辑
 if selected_scenario == "商务二级":
     st.sidebar.warning("ℹ️ 逻辑：基于【名称】匹配")
 else:
@@ -201,7 +199,6 @@ def process_writeoff_discount(df, target_scenario):
     df['金额'] = clean_amount(df[col_amt])
     df['类型'] = df[col_type].apply(clean_str) 
     
-    # --- 智能筛选 ---
     if target_scenario != "自定义":
         keywords = get_search_keyword(target_scenario)
         pattern = "|".join([k.replace('-', r'\-') for k in keywords])
@@ -244,7 +241,6 @@ def process_erp_generic(df, bus_map, valid_codes, valid_names, scenario, mode):
     df['提取_业务线Code'] = df['帐户'].apply(extract_bus)
     df['业务线'] = df['提取_业务线Code'].apply(clean_str).map(bus_map) if bus_map else None
     
-    # 商务二级 仅在 暂估模式 下用名称匹配，冲销模式下用户要求也用编码
     if mode == "PROVISION" and scenario == "商务二级":
         df['标准名称'] = df['原始交易名称'].apply(normalize_brackets)
         df['透视Key'] = df['标准名称'] + df['业务线']
@@ -266,12 +262,10 @@ def perform_reconciliation(df_p, df_e, mode):
     key_col = '透视Key'
     
     if mode == "PROVISION":
-        # 暂估：聚合
         p_agg = df_p.dropna(subset=[key_col]).groupby(key_col).agg({
             '传ERP金额':'sum', '金额_不含税':'sum', '税额':'sum'
         }).rename(columns={'传ERP金额':'折让_总额', '金额_不含税':'折让_金额', '税额':'折让_税额'})
     else:
-        # 冲销：透视类型
         p_data = df_p.dropna(subset=[key_col])
         if p_data.empty: return pd.DataFrame()
         p_agg = p_data.pivot_table(index=key_col, columns='类型', values='金额', aggfunc='sum', fill_value=0)
@@ -307,16 +301,14 @@ def perform_reconciliation(df_p, df_e, mode):
     merged = pd.merge(p_agg, e_pivot, left_index=True, right_index=True, how='outer').fillna(0)
     
     if mode == "PROVISION":
-        # 暂估：A + B = 0
         merged['核对_应收(0)'] = merged['折让_总额'] + merged['ERP_应收账款']
         merged['核对_收入(0)'] = merged['折让_金额'] + merged['ERP_主营收入']
         merged['核对_税额(0)'] = merged['折让_税额'] + merged['ERP_销项税']
         cols = ['折让_总额', 'ERP_应收账款', '核对_应收(0)', '折让_金额', 'ERP_主营收入', '核对_收入(0)', '折让_税额', 'ERP_销项税', '核对_税额(0)']
         return merged[[c for c in cols if c in merged.columns]]
     else:
-        # 冲销：A - B = 0 (数额相减)
+        # 相减逻辑
         merged['核对_差额(0)'] = merged['折让_汇总总计'] - merged['ERP_应收账款(总账)']
-        
         fixed_cols = ['折让_汇总总计', 'ERP_应收账款(总账)', '核对_差额(0)']
         other_cols = [c for c in merged.columns if c not in fixed_cols and 'ERP' not in c]
         return merged[fixed_cols + other_cols]
@@ -349,14 +341,12 @@ if match_file_source and file_left and file_right:
                 
                 df_view = df_main.copy()
                 if show_diff:
-                    # 只要任意一列核对值不为0，就保留
                     chk = [c for c in df_view.columns if '核对' in c]
                     cond = df_view[chk].apply(lambda x: x.abs()>0.01).any(axis=1)
                     df_view = df_view[cond]
                 
                 df_t = add_total_row(df_view)
                 
-                # 下拉选择器
                 valid_opts = [i for i in df_t.index if i != "=== 总计 ==="]
                 c_sel, _ = st.columns([2,3])
                 selected_key = c_sel.selectbox("🔍 选择查看明细:", ["(请选择)"] + list(valid_opts), key=f"sel_{key_prefix}")
@@ -389,26 +379,29 @@ if match_file_source and file_left and file_right:
                     with pd.ExcelWriter(out, engine='xlsxwriter') as w:
                         add_total_row(res).to_excel(w, sheet_name='客户对账')
                         if not res_rel.empty: add_total_row(res_rel).to_excel(w, sheet_name='关联方对账')
-                    st.download_button("下载暂估核对", out.getvalue(), "暂估核对.xlsx")
+                        # 导出清洗后明细
+                        df_p.to_excel(w, sheet_name='折让明细_清洗后', index=False)
+                        df_e.to_excel(w, sheet_name='ERP明细_清洗后', index=False)
+                    st.download_button("📥 下载暂估核对 (含清洗后明细)", out.getvalue(), "暂估核对.xlsx")
 
             else:
-                # === 冲销 ===
+                # 冲销模式
                 df_p = process_writeoff_discount(df_l, selected_scenario)
                 if df_p.empty: st.stop()
                 
                 df_e = process_erp_generic(df_r, bus_map, valid_codes, None, selected_scenario, "WRITEOFF")
+                res_wo = perform_reconciliation(df_p, df_e, "WRITEOFF")
                 
                 st.write(f"📊 数据行数: 折让 {len(df_p)} | ERP {len(df_e)}")
-                
-                res_wo = perform_reconciliation(df_p, df_e, "WRITEOFF")
                 render_safe_tab(res_wo, df_p, df_e, "wo")
                 
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine='xlsxwriter') as w:
                     add_total_row(res_wo).to_excel(w, sheet_name='冲销核对')
-                    df_p.to_excel(w, sheet_name='折让明细', index=False)
-                    df_e.to_excel(w, sheet_name='ERP明细', index=False)
-                st.download_button("下载冲销核对", out.getvalue(), "冲销核对.xlsx")
+                    # 导出清洗后明细 (统一名称)
+                    df_p.to_excel(w, sheet_name='折让明细_清洗后', index=False)
+                    df_e.to_excel(w, sheet_name='ERP明细_清洗后', index=False)
+                st.download_button("📥 下载冲销核对 (含清洗后明细)", out.getvalue(), "冲销核对.xlsx")
 
         except Exception as e:
             st.error(f"处理错误: {e}")
